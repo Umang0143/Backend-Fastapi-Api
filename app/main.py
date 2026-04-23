@@ -68,6 +68,7 @@ class Signup(BaseModel):
     mobile: str
     address: str
     fileUrl: str
+    city: str
  
 @app.post("/signup")
 def register(user: Signup):
@@ -80,7 +81,8 @@ def register(user: Signup):
             user.email,
             user.mobile,
             user.address,
-            user.fileUrl
+            user.fileUrl,
+            user.city
         )
 
         connection.commit()
@@ -89,8 +91,6 @@ def register(user: Signup):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
 
 # READ (GetUsers)
 @app.get("/getusers")
@@ -173,3 +173,39 @@ def delete_user(id:int):
     return {
       "message":"Deleted Successfully"
     }
+
+
+@app.get("/users")
+def get_users(page: int = 1, limit: int = 10):
+    try:
+        cursor = connection.cursor()
+
+        offset = (page - 1) * limit
+
+        query = f"""
+        SELECT * FROM Research.Registration
+        ORDER BY id
+        OFFSET ? ROWS
+        FETCH NEXT ? ROWS ONLY
+        """
+
+        cursor.execute(query, offset, limit)
+
+        columns = [col[0] for col in cursor.description]
+        rows = cursor.fetchall()
+
+        result = [dict(zip(columns, row)) for row in rows]
+
+        # Total count
+        cursor.execute("SELECT COUNT(*) FROM Research.Registration")
+        total = cursor.fetchone()[0]
+
+        return {
+            "data": result,
+            "total": total,
+            "page": page,
+            "limit": limit
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

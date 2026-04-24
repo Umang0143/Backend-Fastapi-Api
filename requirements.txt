@@ -5,6 +5,6 @@ pydantic[Field]
 pyodbc
 python-dotenv
 passlib[bcrypt]
-jwt
+PyJWT
 python-jose[cryptography]
 requests

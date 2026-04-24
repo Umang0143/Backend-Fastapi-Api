@@ -17,29 +17,23 @@
 
 import pyodbc
 import os
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, EmailStr
-from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-from passlib.context import CryptContext
+import jwt
+import requests
 
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, EmailStr
+from dotenv import load_dotenv
+
+
+
+# -------------------- INIT --------------------
+# Initialize the FastAPI application and set up HTTP Bearer authentication for securing endpoints that require token verification.
 app = FastAPI()
+security = HTTPBearer()
 
 load_dotenv(".env")
-
-# Database connection parameters from environment variables
-server = os.getenv("DB_SERVER")
-database = os.getenv("DB_DATABASE")
-username = os.getenv("DB_UID")
-password = os.getenv("DB_PWD")
-
-
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
- 
-def hash_password(password: str):
-    return pwd_context.hash(password)
-
 
 # CORS Middleware
 app.add_middleware(
@@ -50,18 +44,59 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# -------------------- ENV --------------------
+# Load AWS Cognito configuration from environment variables
+COGNITO_REGION = os.getenv("AWS_REGION")
+USER_POOL_ID = os.getenv("USER_POOL_ID")
+APP_CLIENT_ID = os.getenv("APP_CLIENT_ID")
 
-# Connection to SQL Server
+# -------------------- JWKS --------------------
+# Construct the JWKS URL based on the Cognito region and user pool ID. This URL is used to retrieve the JSON Web Key Set (JWKS) for verifying JWT tokens issued by AWS Cognito.
+JWKS_URL = f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{USER_POOL_ID}/.well-known/jwks.json"
+
+def get_jwks():
+    return requests.get(JWKS_URL).json()
+
+# -------------------- TOKEN VERIFY --------------------
+# This function verifies the JWT token sent in the Authorization header. It retrieves the JWKS from AWS Cognito, extracts the appropriate public key, and decodes the token to validate it and extract the payload.
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+
+    try:
+        jwks = get_jwks()
+
+        headers = jwt.get_unverified_header(token)
+        kid = headers["kid"]
+
+        key = next(k for k in jwks["keys"] if k["kid"] == kid)
+        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key)
+
+        payload = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            audience=APP_CLIENT_ID
+        )
+
+        return payload
+
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
+# -------------------- DB CONNECTION --------------------
+# Establish a connection to the SQL Server database using pyodbc and environment variables for configuration.
 connection = pyodbc.connect(
     f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-    f"SERVER={server};"
-    f"DATABASE={database};"
-    f"UID={username};"
-    f"PWD={password};"
+    f"SERVER={os.getenv('DB_SERVER')};"
+    f"DATABASE={os.getenv('DB_DATABASE')};"
+    f"UID={os.getenv('DB_UID')};"
+    f"PWD={os.getenv('DB_PWD')};"
     "Encrypt=no;"
 )
 
-# CREATE (RegisterUser)
+# -------------------- MODELS --------------------
+# Pydantic models for request validation and response formatting
 class Signup(BaseModel):
     name: str
     email: EmailStr
@@ -69,14 +104,23 @@ class Signup(BaseModel):
     address: str
     fileUrl: str
     city: str
+
+class User(BaseModel):
+    name: str
+    email: EmailStr
+    mobile: str
+    address: str
+    city: str
  
+# -------------------- CREATE --------------------
+# This endpoint allows users to sign up by providing their details. It does not require authentication.
 @app.post("/signup")
 def register(user: Signup):
     try:
         cursor = connection.cursor()
 
         cursor.execute(
-            "EXEC Research.RegisterUser ?, ?, ?, ?, ?",
+            "EXEC Research.RegisterUser ?, ?, ?, ?, ?, ?",
             user.name,
             user.email,
             user.mobile,
@@ -92,21 +136,15 @@ def register(user: Signup):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# READ (GetUsers)
+
+# -------------------- READ (ALL) --------------------
+# This endpoint retrieves all users from the database and requires authentication via the verify_token dependency.
 @app.get("/getusers")
-def get_students():
-
+def get_students(user=Depends(verify_token)):
     cursor = connection.cursor()
+    cursor.execute("EXEC GetUsers")
 
-    cursor.execute(
-      "EXEC GetUsers"
-    )
-
-    columns = [
-      column[0]
-      for column in cursor.description
-    ]
-
+    columns = [col[0] for col in cursor.description]
     rows = cursor.fetchall()
 
     result=[]
@@ -117,91 +155,97 @@ def get_students():
       )
 
     return result
-
-
-
-# UPDATE (UpdateUser)
-class User(BaseModel):
-    name: str
-    email: EmailStr
-    mobile: str
  
+# -------------------- UPDATE --------------------
+# This endpoint updates a user's information by ID and requires authentication via the verify_token dependency.
 @app.put("/update/{id}")
-def update_user(
- id:int,
- data:User
-):
-
-    cursor=connection.cursor()
+def update_user(id: int, data: User, user=Depends(verify_token)):
+    cursor = connection.cursor()
 
     cursor.execute(
-    """
-    EXEC Research.UpdateUser
-    ?,?,?,?,?
-    """,
-
-    id,
-    data.name,
-    data.email,
-
-    "",
-
-    data.mobile
+        "EXEC Research.UpdateUser ?, ?, ?, ?, ?, ?",
+        id,
+        data.name,
+        data.email,
+        data.mobile,
+        data.address,
+        data.city
     )
 
     connection.commit()
 
-    return {
-      "message":"Updated Successfully"
-    }
+    return {"message": "Updated Successfully"}
 
 
-
-# DELETE (DeleteUser)
+# -------------------- DELETE --------------------
+# This endpoint deletes a user by ID and requires authentication via the verify_token dependency.
 @app.delete("/delete/{id}")
-def delete_user(id:int):
+def delete_user(id: int, user=Depends(verify_token)):
+    cursor = connection.cursor()
 
-    cursor=connection.cursor()
-
-    cursor.execute(
-      "EXEC DeleteUser ?",
-      id
-    )
-
+    cursor.execute("EXEC DeleteUser ?", id)
     connection.commit()
 
-    return {
-      "message":"Deleted Successfully"
-    }
+    return {"message": "Deleted Successfully"}
 
 
+# -------------------- PAGINATION --------------------
+# This endpoint supports pagination, searching by name, email, or city, and returns the total count of matching records.
 @app.get("/users")
-def get_users(page: int = 1, limit: int = 10):
+def get_users(
+    page: int = 1,
+    limit: int = 10,
+    search: str = "",
+    user=Depends(verify_token)
+):
     try:
         cursor = connection.cursor()
 
         offset = (page - 1) * limit
 
-        query = f"""
+        query = """
         SELECT * FROM Research.Registration
+        WHERE
+            (? = '' OR name LIKE ? OR email LIKE ? OR city LIKE ?)
         ORDER BY id
         OFFSET ? ROWS
         FETCH NEXT ? ROWS ONLY
         """
 
-        cursor.execute(query, offset, limit)
+        search_param = f"%{search}%"
+
+        cursor.execute(
+            query,
+            search,
+            search_param,
+            search_param,
+            search_param,
+            offset,
+            limit
+        )
 
         columns = [col[0] for col in cursor.description]
         rows = cursor.fetchall()
 
-        result = [dict(zip(columns, row)) for row in rows]
+        data = [dict(zip(columns, row)) for row in rows]
 
-        # Total count
-        cursor.execute("SELECT COUNT(*) FROM Research.Registration")
+        # total count with search
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM Research.Registration
+            WHERE
+                (? = '' OR name LIKE ? OR email LIKE ? OR city LIKE ?)
+            """,
+            search,
+            search_param,
+            search_param,
+            search_param
+        )
+
         total = cursor.fetchone()[0]
 
         return {
-            "data": result,
+            "data": data,
             "total": total,
             "page": page,
             "limit": limit

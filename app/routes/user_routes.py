@@ -1,92 +1,145 @@
-# from fastapi import APIRouter, Depends
-# from app.schema.user_schema import Signup, UserUpdate
-# from app.services import user_service
-# from app.routes.deps import get_current_user
+from fastapi import APIRouter, Depends, HTTPException
+from app.core.db import get_db_connection
+from app.core.security import verify_token
+from app.schema.user_schema import Signup, User
 
-# router = APIRouter()
+router = APIRouter()
 
-# @router.post("/signup")
-# def signup(user: Signup):
-#     user_service.create_user(user)
-#     return {"message": "User Registered"}
+# ---------------- SIGNUP ----------------
+@router.post("/signup")
+def register(user: Signup):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-# @router.get("/getusers")
-# def get_users(user=Depends(get_current_user)):
-#     return user_service.get_users()
+        cursor.execute(
+            "EXEC Research.RegisterUser ?, ?, ?, ?, ?, ?",
+            user.name,
+            user.email,
+            user.mobile,
+            user.address,
+            user.fileUrl,
+            user.city
+        )
 
-# @router.put("/update/{id}")
-# def update(id: int, data: UserUpdate, user=Depends(get_current_user)):
-#     user_service.update_user(id, data)
-#     return {"message": "Updated"}
+        conn.commit()
+        return {"message": "User Registered Successfully"}
 
-# @router.delete("/delete/{id}")
-# def delete(id: int, user=Depends(get_current_user)):
-#     user_service.delete_user(id)
-#     return {"message": "Deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ---------------- GET USERS (PAGINATION + SEARCH) ----------------
+@router.get("/users")
+def get_users(
+    page: int = 1,
+    limit: int = 8,
+    search: str = "",
+    user=Depends(verify_token)
+):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        offset = (page - 1) * limit
+
+        query = """
+        SELECT * FROM Research.Registration
+        WHERE (? = '' OR name LIKE ? OR email LIKE ? OR city LIKE ?)
+        ORDER BY id
+        OFFSET ? ROWS
+        FETCH NEXT ? ROWS ONLY
+        """
+
+        search_param = f"%{search}%"
+
+        cursor.execute(
+            query,
+            search,
+            search_param,
+            search_param,
+            search_param,
+            offset,
+            limit
+        )
+
+        columns = [col[0] for col in cursor.description]
+        rows = cursor.fetchall()
+
+        data = [dict(zip(columns, row)) for row in rows]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM Research.Registration
+            WHERE (? = '' OR name LIKE ? OR email LIKE ? OR city LIKE ?)
+            """,
+            search,
+            search_param,
+            search_param,
+            search_param
+        )
+
+        total = cursor.fetchone()[0]
+
+        return {
+            "data": data,
+            "total": total,
+            "page": page,
+            "limit": limit
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ---------------- UPDATE ----------------
+@router.put("/update/{id}")
+def update_user(id: int, data: User, user=Depends(verify_token)):
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "EXEC Research.UpdateUser ?, ?, ?, ?, ?, ?",
+        id,
+        data.name,
+        data.email,
+        data.mobile,
+        data.address,
+        data.city
+    )
+
+    conn.commit()
+
+    return {"message": "Updated Successfully"}
 
 
-# from fastapi import APIRouter, Depends
-# from app.schema import user_schema
-# from app.services.user_service import UserService
-# from app.core.security import verify_token
- 
-# router = APIRouter(prefix="/api/users", tags=["users"])
-# service = UserService()
-# @router.post("/")
-# def create_user(user: user_schema.Signup, token=Depends(verify_token)):
-#     service.create_user(user)
-#     return {"message": "User Created"}
- 
- 
-# @router.get("/")
-# def get_users(token=Depends(verify_token)):
-#     rows = service.get_users()
- 
-#     return [
-#         {
-#             "id": r["id"],
-#             "name": r["name"],
-#             "email": r["email"],
-#             "mobile": r["mobile"]
-#         }
-#         for r in rows
-#     ]
- 
- 
-# @router.put("/{id}")
-# def update_user(id: int, user: user_schema.UserUpdate, token=Depends(verify_token)):
-#     service.update_user(id, user)
-#     return {"message": "User Updated"}
- 
- 
-# @router.delete("/{id}")
-# def delete_user(id: int, token=Depends(verify_token)):
-#     service.delete_user(id)
-#     return {"message": "User Deleted"}
+# ---------------- DELETE ----------------
+@router.delete("/delete/{id}")
+def delete_user(id: int, user=Depends(verify_token)):
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("EXEC DeleteUser ?", id)
+    conn.commit()
+
+    return {"message": "Deleted Successfully"}
 
 
-# from fastapi import APIRouter, Depends
-# from app.schema.user_schema import Signup, UserUpdate
-# from app.services import user_service
-# from app.routes.deps import get_current_user
 
-# router = APIRouter()
 
-# @router.post("/signup")
-# def signup(user: Signup):
-#     user_service.register_user(user)
-#     return {"message": "User Registered"}
+@router.get("/getusers")
+def get_students(user=Depends(verify_token)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("EXEC GetUsers")
 
-# @router.get("/getusers")
-# def get_users(user=Depends(get_current_user)):
-#     return user_service.get_all_users()
+    columns = [col[0] for col in cursor.description]
+    rows = cursor.fetchall()
 
-# @router.put("/update/{id}")
-# def update(id: int, data: UserUpdate, user=Depends(get_current_user)):
-#     user_service.update_user(id, data)
-#     return {"message": "Updated"}
+    result=[]
 
-# @router.delete("/delete/{id}")
-# def delete(id: int, user=Depends(get_current_user)):
-#     user_service.delete_user(id)
-#     return {"message": "Deleted"}
+    for row in rows:
+      result.append(
+       dict(zip(columns,row))
+      )
+
+    return result
